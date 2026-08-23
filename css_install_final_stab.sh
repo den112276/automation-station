@@ -302,11 +302,16 @@ function update_mapcycle {
     
     # Предлагаем перезапустить сервер, чтобы mapcycle применился
     echo ""
-    read -p "$(echo -e "${WHITE}Перезагрузить сервер CSS, чтобы применить изменения mapcycle.txt? (y/n): ${NC}")" restart_choice
-    if [ "$restart_choice" = "y" ] || [ "$restart_choice" = "Y" ]; then
-        restart_css_server "$username"
+    if [ -f "/home/$username/start_css.sh" ]; then
+        read -p "$(echo -e "${WHITE}Перезагрузить сервер CSS, чтобы применить изменения mapcycle.txt? (y/n): ${NC}")" restart_choice
+        if [ "$restart_choice" = "y" ] || [ "$restart_choice" = "Y" ]; then
+            restart_css_server "$username"
+        else
+            echo -e "${YELLOW}Перезапуск пропущен. Изменения mapcycle.txt применятся после следующего рестарта сервера.${NC}"
+        fi
     else
-        echo -e "${YELLOW}Перезапуск пропущен. Изменения mapcycle.txt применятся после следующего рестарта сервера.${NC}"
+        echo -e "${CYAN}Скрипт запуска ещё не создан — сервер будет запущен на следующем шаге установки.${NC}"
+        echo -e "${CYAN}Изменения mapcycle.txt применятся после первого запуска сервера.${NC}"
     fi
     
     sleep 1
@@ -918,14 +923,26 @@ EOF
     read -p "$(echo -e "${WHITE}Нажмите Enter для продолжения...${NC}")"
 }
 
-# Функция для установки плагинов (упрощенная версия)
+# Функция для установки плагинов
 function install_plugins {
     local username=$1
     local SOURCEMOD_DIR="/home/$username/csserver/cstrike/addons/sourcemod"
+    local CSTRIKE_DIR="/home/$username/csserver/cstrike"
     
     if [ ! -d "$SOURCEMOD_DIR" ]; then
         echo -e "${RED}SourceMod не установлен! Невозможно установить плагины.${NC}"
         return 1
+    fi
+    
+    # Проверка наличия unzip
+    if ! command -v unzip &> /dev/null; then
+        echo -e "${YELLOW}Утилита unzip не найдена. Устанавливаем...${NC}"
+        apt-get install -y unzip
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Не удалось установить unzip!${NC}"
+            return 1
+        fi
+        echo -e "${GREEN}✓ unzip установлен${NC}"
     fi
     
     clear_screen
@@ -941,13 +958,40 @@ function install_plugins {
     echo ""
     
     local plugins=(
-        "1|WeaponGiver|Выдача оружия|https://raw.githubusercontent.com/den112276/steamclientmod/main/sm_weapongiver_rus_1.01.smx|"
-        "2|NoBlock|Проходить сквозь игроков своей команды|https://raw.githubusercontent.com/den112276/steamclientmod/main/noblock.smx|"
+        "1|WeaponGiver|Выдача оружия|https://raw.githubusercontent.com/den112276/steamclientmod/main/sm_weapongiver_rus_1.01.smx|sm_weapongiver_rus_1.01.smx"
+        "2|NoBlock|Проходить сквозь игроков своей команды|https://raw.githubusercontent.com/den112276/steamclientmod/main/noblock.smx|noblock.smx"
+        "3|BotsManager|Менеджер ботов|https://github.com/den112276/steamclientmod/raw/refs/heads/main/BotsManager.zip|BotsManager.zip"
+        "4|LanOfDoomRespawn|Возрождение после смерти|https://github.com/den112276/steamclientmod/raw/refs/heads/main/lan_of_doom_respawn.smx|lan_of_doom_respawn.smx"
+        "5|new_year_seconds|Сколько осталось до НГ|https://github.com/den112276/steamclientmod/raw/refs/heads/main/new_year_seconds.smx|new_year_seconds.smx"
     )
     
     for plugin in "${plugins[@]}"; do
-        IFS='|' read -r num name desc smx_url trans_url cfg_url <<< "$plugin"
-        echo -e "${WHITE}$num) ${GREEN}$name${NC} - ${YELLOW}$desc${NC}"
+        IFS='|' read -r num name desc url filename <<< "$plugin"
+        local status=""
+        local is_installed=0
+        
+        # Проверка установки плагина
+        if [ "$name" = "BotsManager" ]; then
+            # Проверяем наличие BotsManager по разным признакам
+            if [ -f "$SOURCEMOD_DIR/plugins/BotsManager.smx" ] || \
+               [ -f "$SOURCEMOD_DIR/plugins/botsmanager.smx" ] || \
+               [ -d "$CSTRIKE_DIR/addons/sourcemod/scripting/BotsManager" ] || \
+               [ -f "$CSTRIKE_DIR/cfg/sourcemod/BotsManager.cfg" ]; then
+                is_installed=1
+            fi
+        else
+            # Для обычных .smx плагинов проверяем наличие файла
+            if [ -f "$SOURCEMOD_DIR/plugins/$filename" ] || [ -f "$SOURCEMOD_DIR/plugins/${name}.smx" ]; then
+                is_installed=1
+            fi
+        fi
+        
+        if [ $is_installed -eq 1 ]; then
+            status="${GREEN}[установлен]${NC}"
+        else
+            status="${YELLOW}[не установлен]${NC}"
+        fi
+        echo -e "${WHITE}$num) ${GREEN}$name${NC} - ${YELLOW}$desc${NC} $status"
     done
     
     echo ""
@@ -977,30 +1021,175 @@ function install_plugins {
     
     local installed_count=0
     local fail_count=0
+    local skipped_count=0
+    local installed_names=()
     
     for num in "${selected_numbers[@]}"; do
         local found=0
         for plugin in "${plugins[@]}"; do
-            IFS='|' read -r p_num p_name p_desc p_smx_url p_trans_url p_cfg_url <<< "$plugin"
+            IFS='|' read -r p_num p_name p_desc p_url p_filename <<< "$plugin"
             if [ "$p_num" -eq "$num" ]; then
                 found=1
                 echo ""
                 echo -e "${CYAN}--- Установка плагина: $p_name ---${NC}"
-                sleep 1
+                sleep 0.5
                 
-                echo -e "${YELLOW}Загрузка $p_name...${NC}"
-                wget --timeout=30 --tries=3 --show-progress -O "$SOURCEMOD_DIR/plugins/${p_name}.smx" "$p_smx_url"
-                slow_pause 1 "⏳ Проверка загрузки"
-                
-                if [ -f "$SOURCEMOD_DIR/plugins/${p_name}.smx" ] && [ -s "$SOURCEMOD_DIR/plugins/${p_name}.smx" ]; then
-                    echo -e "${GREEN}✓ $p_name успешно загружен${NC}"
-                    chown "$username":"$username" "$SOURCEMOD_DIR/plugins/${p_name}.smx"
-                    installed_count=$((installed_count + 1))
-                    sleep 1
+                # Проверяем, установлен ли уже плагин
+                local already_installed=0
+                if [ "$p_name" = "BotsManager" ]; then
+                    if [ -f "$SOURCEMOD_DIR/plugins/BotsManager.smx" ] || \
+                       [ -f "$SOURCEMOD_DIR/plugins/botsmanager.smx" ] || \
+                       [ -d "$CSTRIKE_DIR/addons/sourcemod/scripting/BotsManager" ] || \
+                       [ -f "$CSTRIKE_DIR/cfg/sourcemod/BotsManager.cfg" ]; then
+                        already_installed=1
+                    fi
                 else
-                    echo -e "${RED}✗ Ошибка загрузки $p_name${NC}"
-                    rm -f "$SOURCEMOD_DIR/plugins/${p_name}.smx" 2>/dev/null
-                    fail_count=$((fail_count + 1))
+                    if [ -f "$SOURCEMOD_DIR/plugins/$p_filename" ] || [ -f "$SOURCEMOD_DIR/plugins/${p_name}.smx" ]; then
+                        already_installed=1
+                    fi
+                fi
+                
+                if [ $already_installed -eq 1 ]; then
+                    echo -e "${YELLOW}Плагин $p_name уже установлен, пропускаем.${NC}"
+                    skipped_count=$((skipped_count + 1))
+                    break
+                fi
+                
+                # Специальная обработка для BotsManager (zip архив)
+                if [ "$p_name" = "BotsManager" ]; then
+                    echo -e "${YELLOW}Загрузка BotsManager.zip...${NC}"
+                    
+                    local tmp_zip="/tmp/BotsManager.zip"
+                    local tmp_extract="/tmp/BotsManager_extract"
+                    
+                    rm -f "$tmp_zip" 2>/dev/null
+                    rm -rf "$tmp_extract" 2>/dev/null
+                    mkdir -p "$tmp_extract"
+                    
+                    # Скачиваем с правильными опциями
+                    wget --timeout=30 --tries=3 --show-progress --no-check-certificate -O "$tmp_zip" "$p_url"
+                    
+                    if [ $? -ne 0 ] || [ ! -f "$tmp_zip" ]; then
+                        echo -e "${RED}✗ Ошибка загрузки BotsManager.zip${NC}"
+                        fail_count=$((fail_count + 1))
+                        rm -f "$tmp_zip" 2>/dev/null
+                        continue
+                    fi
+                    
+                    # Проверяем размер файла
+                    local file_size=$(stat -c%s "$tmp_zip" 2>/dev/null || stat -f%z "$tmp_zip" 2>/dev/null)
+                    if [ -z "$file_size" ] || [ "$file_size" -lt 1000 ]; then
+                        echo -e "${RED}✗ Файл слишком маленький ($file_size байт), возможно, это страница ошибки GitHub${NC}"
+                        echo -e "${YELLOW}Проверьте ссылку: $p_url${NC}"
+                        fail_count=$((fail_count + 1))
+                        rm -f "$tmp_zip" 2>/dev/null
+                        continue
+                    fi
+                    
+                    echo -e "${GREEN}✓ Файл загружен (размер: $file_size байт)${NC}"
+                    slow_pause 1 "⏳ Проверка архива"
+                    
+                    # Проверяем, что это действительно ZIP архив
+                    if file "$tmp_zip" | grep -q "Zip archive"; then
+                        echo -e "${GREEN}✓ Файл является ZIP архивом${NC}"
+                    else
+                        echo -e "${RED}✗ Файл не является ZIP архивом${NC}"
+                        echo -e "${YELLOW}Содержимое файла (первые 200 байт):${NC}"
+                        head -c 200 "$tmp_zip" | cat -v
+                        echo ""
+                        fail_count=$((fail_count + 1))
+                        rm -f "$tmp_zip" 2>/dev/null
+                        continue
+                    fi
+                    
+                    echo -e "${YELLOW}Распаковка архива в cstrike...${NC}"
+                    
+                    # Сначала пробуем распаковать во временную папку чтобы посмотреть структуру
+                    if unzip -o "$tmp_zip" -d "$tmp_extract" 2>/tmp/unzip_error.log; then
+                        echo -e "${GREEN}✓ Архив успешно распакован во временную папку${NC}"
+                        
+                        # Показываем структуру архива
+                        echo -e "${CYAN}Структура архива:${NC}"
+                        find "$tmp_extract" -type f | head -20 | while read -r f; do
+                            echo -e "${WHITE}  ${f#$tmp_extract/}${NC}"
+                        done
+                        
+                        # Копируем файлы в правильные места
+                        echo -e "${YELLOW}Копирование файлов в cstrike...${NC}"
+                        
+                        # Проверяем структуру архива и копируем соответственно
+                        if [ -d "$tmp_extract/addons" ]; then
+                            cp -r "$tmp_extract/addons"/* "$CSTRIKE_DIR/addons/" 2>/dev/null
+                            echo -e "${GREEN}  ✓ Скопированы addons файлы${NC}"
+                        fi
+                        
+                        if [ -d "$tmp_extract/cfg" ]; then
+                            cp -r "$tmp_extract/cfg"/* "$CSTRIKE_DIR/cfg/" 2>/dev/null
+                            echo -e "${GREEN}  ✓ Скопированы cfg файлы${NC}"
+                        fi
+                        
+                        if [ -d "$tmp_extract/plugins" ]; then
+                            mkdir -p "$SOURCEMOD_DIR/plugins"
+                            cp -r "$tmp_extract/plugins"/* "$SOURCEMOD_DIR/plugins/" 2>/dev/null
+                            echo -e "${GREEN}  ✓ Скопированы plugins файлы${NC}"
+                        fi
+                        
+                        # Если в корне архива есть .smx файлы
+                        find "$tmp_extract" -maxdepth 1 -name "*.smx" 2>/dev/null | while read -r smx_file; do
+                            cp "$smx_file" "$SOURCEMOD_DIR/plugins/" 2>/dev/null
+                            echo -e "${GREEN}  ✓ Скопирован $(basename "$smx_file") в plugins/${NC}"
+                        done
+                        
+                        # Если в корне архива есть .cfg файлы
+                        find "$tmp_extract" -maxdepth 1 -name "*.cfg" 2>/dev/null | while read -r cfg_file; do
+                            mkdir -p "$CSTRIKE_DIR/cfg/sourcemod"
+                            cp "$cfg_file" "$CSTRIKE_DIR/cfg/sourcemod/" 2>/dev/null
+                            echo -e "${GREEN}  ✓ Скопирован $(basename "$cfg_file") в cfg/sourcemod/${NC}"
+                        done
+                        
+                        # Ищем BotsManager в любом месте
+                        find "$tmp_extract" -name "*Bots*" -o -name "*bots*" 2>/dev/null | while read -r file; do
+                            echo -e "${CYAN}  Найден файл: ${file#$tmp_extract/}${NC}"
+                        done
+                        
+                        echo -e "${GREEN}✓ BotsManager успешно установлен${NC}"
+                        
+                        # Устанавливаем правильные права
+                        chown -R "$username":"$username" "$CSTRIKE_DIR/addons" 2>/dev/null
+                        chown -R "$username":"$username" "$CSTRIKE_DIR/cfg" 2>/dev/null
+                        
+                        installed_count=$((installed_count + 1))
+                        installed_names+=("$p_name")
+                        
+                    else
+                        echo -e "${RED}✗ Ошибка распаковки BotsManager.zip${NC}"
+                        echo -e "${YELLOW}Ошибка unzip:${NC}"
+                        cat /tmp/unzip_error.log 2>/dev/null | head -5
+                        fail_count=$((fail_count + 1))
+                    fi
+                    
+                    # Очистка временных файлов
+                    rm -f "$tmp_zip" 2>/dev/null
+                    rm -f /tmp/unzip_error.log 2>/dev/null
+                    rm -rf "$tmp_extract" 2>/dev/null
+                    
+                else
+                    # Обычная установка .smx плагина
+                    echo -e "${YELLOW}Загрузка $p_name...${NC}"
+                    wget --timeout=30 --tries=3 --show-progress -O "$SOURCEMOD_DIR/plugins/$p_filename" "$p_url"
+                    slow_pause 1 "⏳ Проверка загрузки"
+                    
+                    if [ -f "$SOURCEMOD_DIR/plugins/$p_filename" ] && [ -s "$SOURCEMOD_DIR/plugins/$p_filename" ]; then
+                        echo -e "${GREEN}✓ $p_name успешно загружен${NC}"
+                        chown "$username":"$username" "$SOURCEMOD_DIR/plugins/$p_filename"
+                        installed_count=$((installed_count + 1))
+                        installed_names+=("$p_name")
+                        sleep 1
+                    else
+                        echo -e "${RED}✗ Ошибка загрузки $p_name${NC}"
+                        rm -f "$SOURCEMOD_DIR/plugins/$p_filename" 2>/dev/null
+                        fail_count=$((fail_count + 1))
+                    fi
                 fi
                 break
             fi
@@ -1014,6 +1203,9 @@ function install_plugins {
     echo ""
     step_echo "Результат установки плагинов"
     echo -e "${GREEN}Успешно установлено: $installed_count${NC}"
+    if [ $skipped_count -gt 0 ]; then
+        echo -e "${YELLOW}Пропущено (уже были): $skipped_count${NC}"
+    fi
     if [ $fail_count -gt 0 ]; then
         echo -e "${RED}Не удалось установить: $fail_count${NC}"
     fi
@@ -1024,6 +1216,257 @@ function install_plugins {
     sleep 2
     
     return 0
+}
+
+# Функция для установки дополнительных карт (по аналогии с плагинами)
+function install_additional_maps {
+    local username=$1
+    local MAPS_DIR="/home/$username/csserver/cstrike/maps"
+    local MAPCYCLE_FILE="/home/$username/csserver/cstrike/cfg/mapcycle.txt"
+    
+    if [ ! -d "$MAPS_DIR" ]; then
+        echo -e "${RED}Директория карт не найдена! Сервер не установлен?${NC}"
+        return 1
+    fi
+    
+    clear_screen
+    step_echo "Установка дополнительных карт"
+    
+    # bzip2 нужен для распаковки .bsp.bz2
+    if ! command -v bzip2 &> /dev/null; then
+        echo -e "${YELLOW}Установка bzip2...${NC}"
+        apt-get install -y bzip2
+    fi
+    
+    echo -e "${CYAN}Доступные дополнительные карты для установки:${NC}"
+    echo -e "${WHITE}0) Пропустить установку карт${NC}"
+    echo ""
+    
+    # Формат: номер|имя_карты|описание|URL (.bsp.bz2 с github.com/den112276/css_maps)
+    local maps_extra=(
+        "1|de_school2|Школа (de_school2)|https://raw.githubusercontent.com/den112276/css_maps/main/de_school2.bsp.bz2"
+        "2|fy_iceworld2k|Iceworld 2K|https://raw.githubusercontent.com/den112276/css_maps/main/fy_iceworld2k.bsp.bz2"
+        "3|aim_headshot|Aim Headshot|https://raw.githubusercontent.com/den112276/css_maps/main/aim_headshot.bsp.bz2"
+        "4|awp_india|AWP India|https://raw.githubusercontent.com/den112276/css_maps/main/awp_india.bsp.bz2"
+        "5|fy_simpsons|Simpsons FY|https://raw.githubusercontent.com/den112276/css_maps/main/fy_simpsons.bsp.bz2"
+        "6|gg_aim_shotty|GG Aim Shotty|https://raw.githubusercontent.com/den112276/css_maps/main/gg_aim_shotty.bsp.bz2"
+        "7|cs_compound|Compound|https://raw.githubusercontent.com/den112276/css_maps/main/cs_compound.bsp.bz2"
+        "8|aim_map2|Aim Map 2|https://raw.githubusercontent.com/den112276/css_maps/main/aim_map2.bsp.bz2"
+        "9|de_dust2_2x2|Dust2 2x2|https://raw.githubusercontent.com/den112276/css_maps/main/de_dust2_2x2.bsp.bz2"
+        "10|de_school|Школа (de_school)|https://raw.githubusercontent.com/den112276/css_maps/main/de_school.bsp.bz2"
+        "11|awp_map|AWP Map|https://raw.githubusercontent.com/den112276/css_maps/main/awp_map.bsp.bz2"
+        "12|fy_iceworld_cssource|Iceworld CSS|https://raw.githubusercontent.com/den112276/css_maps/main/fy_iceworld_cssource.bsp.bz2"
+        "13|de_cache|Cache|https://raw.githubusercontent.com/den112276/css_maps/main/de_cache.bsp.bz2"
+        "14|de_mirage|Mirage|https://raw.githubusercontent.com/den112276/css_maps/main/de_mirage.bsp.bz2"
+        "15|aim_ak47|Aim AK47|https://raw.githubusercontent.com/den112276/css_maps/main/aim_ak47.bsp.bz2"
+        "16|de_contra|Contra|https://raw.githubusercontent.com/den112276/css_maps/main/de_contra.bsp.bz2"
+        "17|cs_estate|Estate|https://raw.githubusercontent.com/den112276/css_maps/main/cs_estate.bsp.bz2"
+        "18|de_boston|Boston|https://raw.githubusercontent.com/den112276/css_maps/main/de_boston.bsp.bz2"
+        "19|de_russka|Russka|https://raw.githubusercontent.com/den112276/css_maps/main/de_russka.bsp.bz2"
+        "20|de_sultan|Sultan|https://raw.githubusercontent.com/den112276/css_maps/main/de_sultan.bsp.bz2"
+        "21|cs_siege|Siege|https://raw.githubusercontent.com/den112276/css_maps/main/cs_siege.bsp.bz2"
+        "22|fy_dustworld|Dustworld FY|https://raw.githubusercontent.com/den112276/css_maps/main/fy_dustworld.bsp.bz2"
+        "23|aim_shotgun|Aim Shotgun|https://raw.githubusercontent.com/den112276/css_maps/main/aim_shotgun.bsp.bz2"
+        "24|de_cpl_mill|CPL Mill|https://raw.githubusercontent.com/den112276/css_maps/main/de_cpl_mill.bsp.bz2"
+        "25|de_fabric|Fabric|https://raw.githubusercontent.com/den112276/css_maps/main/de_fabric.bsp.bz2"
+        "26|gg_dust|GG Dust|https://raw.githubusercontent.com/den112276/css_maps/main/gg_dust.bsp.bz2"
+        "27|de_inferno_pro|Inferno Pro|https://raw.githubusercontent.com/den112276/css_maps/main/de_inferno_pro.bsp.bz2"
+        "28|de_cpl_strike|CPL Strike|https://raw.githubusercontent.com/den112276/css_maps/main/de_cpl_strike.bsp.bz2"
+        "29|cs_mansion|Mansion|https://raw.githubusercontent.com/den112276/css_maps/main/cs_mansion.bsp.bz2"
+        "30|fy_poolparty|Pool Party|https://raw.githubusercontent.com/den112276/css_maps/main/fy_poolparty.bsp.bz2"
+        "31|gg_factory|GG Factory|https://raw.githubusercontent.com/den112276/css_maps/main/gg_factory.bsp.bz2"
+        "32|de_westwood2|Westwood 2|https://raw.githubusercontent.com/den112276/css_maps/main/de_westwood2.bsp.bz2"
+        "33|awp_metro|AWP Metro|https://raw.githubusercontent.com/den112276/css_maps/main/awp_metro.bsp.bz2"
+        "34|gg_autumn|GG Autumn|https://raw.githubusercontent.com/den112276/css_maps/main/gg_autumn.bsp.bz2"
+        "35|gg_overpass|GG Overpass|https://raw.githubusercontent.com/den112276/css_maps/main/gg_overpass.bsp.bz2"
+        "36|paintball|Paintball|https://raw.githubusercontent.com/den112276/css_maps/main/paintball.bsp.bz2"
+        "37|glasstrap_final|Glasstrap Final|https://raw.githubusercontent.com/den112276/css_maps/main/glasstrap_final.bsp.bz2"
+        "38|zm_desolo|ZM Desolo|https://raw.githubusercontent.com/den112276/css_maps/main/zm_desolo.bsp.bz2"
+		
+    )
+    
+    for map_entry in "${maps_extra[@]}"; do
+        IFS='|' read -r num name desc url <<< "$map_entry"
+        local status=""
+        if [ -f "$MAPS_DIR/${name}.bsp" ]; then
+            status="${GREEN}[уже есть]${NC}"
+        else
+            status="${YELLOW}[не установлена]${NC}"
+        fi
+        echo -e "${WHITE}$num) ${GREEN}$name${NC} - ${YELLOW}$desc${NC} $status"
+    done
+    
+    echo ""
+    echo -e "${CYAN}Введите номера карт через запятую или пробел (например: 1,3,5 или 1 3 5)${NC}"
+    echo -e "${CYAN}Или введите диапазон (например: 1-5)${NC}"
+    read -p "$(echo -e "${WHITE}Выберите карты для установки: ${NC}")" map_choice
+    
+    if [[ "$map_choice" == "0" ]] || [[ -z "$map_choice" ]]; then
+        echo -e "${YELLOW}Установка карт пропущена.${NC}"
+        sleep 1
+        return 0
+    fi
+    
+    local selected_numbers=()
+    IFS=', ' read -ra choices <<< "$map_choice"
+    for choice in "${choices[@]}"; do
+        if [[ "$choice" =~ ^[0-9]+$ ]]; then
+            selected_numbers+=("$choice")
+        elif [[ "$choice" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            for ((i=${BASH_REMATCH[1]}; i<=${BASH_REMATCH[2]}; i++)); do
+                selected_numbers+=("$i")
+            done
+        fi
+    done
+    
+    selected_numbers=($(echo "${selected_numbers[@]}" | tr ' ' '\n' | sort -nu | tr '\n' ' '))
+    
+    local installed_count=0
+    local fail_count=0
+    local skipped_count=0
+    local installed_names=()
+    
+    for num in "${selected_numbers[@]}"; do
+        local found=0
+        for map_entry in "${maps_extra[@]}"; do
+            IFS='|' read -r m_num m_name m_desc m_url <<< "$map_entry"
+            if [ "$m_num" -eq "$num" ]; then
+                found=1
+                echo ""
+                echo -e "${CYAN}--- Установка карты: $m_name ---${NC}"
+                sleep 0.5
+                
+                if [ -f "$MAPS_DIR/${m_name}.bsp" ]; then
+                    echo -e "${YELLOW}Карта $m_name уже установлена, пропускаем.${NC}"
+                    skipped_count=$((skipped_count + 1))
+                    break
+                fi
+                
+                local tmp_bz2="/tmp/${m_name}.bsp.bz2"
+                local tmp_bsp="/tmp/${m_name}.bsp"
+                rm -f "$tmp_bz2" "$tmp_bsp" 2>/dev/null
+                
+                echo -e "${YELLOW}Загрузка $m_name...${NC}"
+                if wget --timeout=60 --tries=3 --show-progress -O "$tmp_bz2" "$m_url" 2>/dev/null; then
+                    if [ -s "$tmp_bz2" ]; then
+                        echo -e "${YELLOW}Распаковка .bz2...${NC}"
+                        if bzip2 -d -c "$tmp_bz2" > "$tmp_bsp" 2>/dev/null && [ -s "$tmp_bsp" ]; then
+                            mv "$tmp_bsp" "$MAPS_DIR/${m_name}.bsp"
+                            chown "$username":"$username" "$MAPS_DIR/${m_name}.bsp"
+                            chmod 644 "$MAPS_DIR/${m_name}.bsp"
+                            echo -e "${GREEN}✓ $m_name успешно установлена${NC}"
+                            installed_count=$((installed_count + 1))
+                            installed_names+=("$m_name")
+                        else
+                            echo -e "${RED}✗ Ошибка распаковки $m_name${NC}"
+                            fail_count=$((fail_count + 1))
+                        fi
+                    else
+                        echo -e "${RED}✗ Скачанный файл пуст: $m_name${NC}"
+                        fail_count=$((fail_count + 1))
+                    fi
+                else
+                    echo -e "${RED}✗ Ошибка загрузки $m_name (URL недоступен или карта отсутствует на FastDL)${NC}"
+                    fail_count=$((fail_count + 1))
+                fi
+                rm -f "$tmp_bz2" "$tmp_bsp" 2>/dev/null
+                break
+            fi
+        done
+        if [ $found -eq 0 ]; then
+            echo -e "${RED}Неверный номер карты: $num${NC}"
+            fail_count=$((fail_count + 1))
+        fi
+    done
+    
+    echo ""
+    step_echo "Результат установки карт"
+    echo -e "${GREEN}Успешно установлено: $installed_count${NC}"
+    if [ $skipped_count -gt 0 ]; then
+        echo -e "${YELLOW}Пропущено (уже были): $skipped_count${NC}"
+    fi
+    if [ $fail_count -gt 0 ]; then
+        echo -e "${RED}Не удалось установить: $fail_count${NC}"
+        echo -e "${YELLOW}Некоторые карты могут отсутствовать на github.com/den112276/css_maps — попробуйте другую версию имени.${NC}"
+    fi
+    
+    if [ $installed_count -gt 0 ]; then
+        # Добавляем установленные карты в mapcycle.txt (если файла нет — создаём)
+        echo ""
+        echo -e "${YELLOW}Обновление mapcycle.txt...${NC}"
+        mkdir -p "$(dirname "$MAPCYCLE_FILE")"
+        if [ ! -f "$MAPCYCLE_FILE" ]; then
+            touch "$MAPCYCLE_FILE"
+            chown "$username":"$username" "$MAPCYCLE_FILE"
+        fi
+        for mapn in "${installed_names[@]}"; do
+            if ! grep -qxF "$mapn" "$MAPCYCLE_FILE" 2>/dev/null; then
+                echo "$mapn" >> "$MAPCYCLE_FILE"
+                echo -e "${GREEN}  + $mapn добавлена в mapcycle.txt${NC}"
+            else
+                echo -e "${CYAN}  · $mapn уже в mapcycle.txt${NC}"
+            fi
+        done
+        chown "$username":"$username" "$MAPCYCLE_FILE"
+        
+        # Предлагаем обновить FastDL
+        if [ -f "/home/$username/generate_fastdl.sh" ]; then
+            echo ""
+            read -p "$(echo -e "${WHITE}Обновить файлы FastDL (сжатие новых карт)? (y/n): ${NC}")" upd_fastdl
+            if [ "$upd_fastdl" = "y" ] || [ "$upd_fastdl" = "Y" ]; then
+                echo -e "${YELLOW}Запуск generate_fastdl.sh...${NC}"
+                chown -R "$username:www-data" "/var/www/fastdl" 2>/dev/null || true
+                chmod -R u+rwX,g+rX "/var/www/fastdl" 2>/dev/null || true
+                sudo -u "$username" env SKIP_SERVER_RESTART=1 bash "/home/$username/generate_fastdl.sh"
+                chown -R "$username:www-data" "/var/www/fastdl" 2>/dev/null || true
+            fi
+        fi
+        
+        # Предлагаем перезапуск (только если скрипт запуска уже создан)
+        echo ""
+        if [ -f "/home/$username/start_css.sh" ]; then
+            read -p "$(echo -e "${WHITE}Перезагрузить сервер CSS, чтобы применить карты? (y/n): ${NC}")" restart_choice
+            if [ "$restart_choice" = "y" ] || [ "$restart_choice" = "Y" ]; then
+                restart_css_server "$username"
+            else
+                echo -e "${YELLOW}Перезапуск пропущен. Карты появятся после следующего рестарта / смены карты.${NC}"
+            fi
+        else
+            echo -e "${CYAN}Скрипт запуска ещё не создан — сервер будет запущен на следующем шаге установки.${NC}"
+            echo -e "${CYAN}Карты появятся после первого запуска сервера.${NC}"
+        fi
+    fi
+    
+    sleep 1
+    read -p "$(echo -e "${WHITE}Нажмите Enter для продолжения...${NC}")"
+    return 0
+}
+
+# Функция для установки плагинов (отдельный пункт меню)
+function install_plugins_menu {
+    local username=$1
+    
+    if [ -z "$username" ]; then
+        read -p "$(echo -e "${WHITE}Введите имя пользователя сервера CSS: ${NC}")" username
+    fi
+    
+    if ! id "$username" &>/dev/null; then
+        echo -e "${RED}Пользователь $username не найден!${NC}"
+        sleep 2
+        return 1
+    fi
+    
+    local SOURCEMOD_DIR="/home/$username/csserver/cstrike/addons/sourcemod"
+    
+    if [ ! -d "$SOURCEMOD_DIR" ]; then
+        echo -e "${RED}SourceMod не установлен! Невозможно установить плагины.${NC}"
+        echo -e "${YELLOW}Сначала установите сервер CSS (пункт меню 1).${NC}"
+        sleep 2
+        return 1
+    fi
+    
+    # Используем существующую функцию install_plugins из скрипта
+    install_plugins "$username"
 }
 
 # Функция для настройки администраторов
@@ -1656,6 +2099,8 @@ function configure_bots {
             "bot_difficulty \"$((bot_difficulty-1))\""
             "bot_quota \"$bot_count\""
             "bot_quota_mode \"fill\""
+			"csb_autokill 0"
+            "bot_chatter off"
         )
         
         for setting in "${bot_config[@]}"; do
@@ -1702,7 +2147,7 @@ function install_css {
     echo -e "${YELLOW}Установка необходимых пакетов...${NC}"
     slow_pause 2 "📦 Подготовка"
     
-    apt-get install -y wget screen cron curl net-tools
+    apt-get install -y wget screen cron curl net-tools zip unzip
     echo -e "${GREEN}✓ Базовые пакеты установлены${NC}"
     sleep 1
     
@@ -1909,6 +2354,9 @@ EOF
     else
         echo -e "${RED}SourceMod не установлен!${NC}"
     fi
+    
+    # Установка дополнительных карт (по аналогии с плагинами)
+    install_additional_maps "$username"
     
     clear_screen
     step_echo "Создание скриптов запуска"
@@ -2199,7 +2647,637 @@ function run_fastdl_cron {
     read -p "$(echo -e "${WHITE}Нажмите Enter для возврата в меню...${NC}")"
 }
 
-# Главное меню
+# Функция для удаления всех дополнительных карт
+function remove_all_maps {
+    local username=$1
+    local MAPS_DIR="/home/$username/csserver/cstrike/maps"
+    local MAPCYCLE_FILE="/home/$username/csserver/cstrike/cfg/mapcycle.txt"
+    local FASTDL_MAPS_DIR="/var/www/fastdl/css/cstrike/maps"
+    
+    clear_screen
+    step_echo "Удаление всех дополнительных карт"
+    
+    if [ ! -d "$MAPS_DIR" ]; then
+        echo -e "${RED}Директория карт не найдена!${NC}"
+        return 1
+    fi
+    
+    # Список стандартных карт CSS (которые НЕ удаляем)
+    local standard_maps=(
+        "cs_assault"
+        "cs_compound"
+        "cs_havana"
+        "cs_italy"
+        "cs_militia"
+        "cs_office"
+        "de_aztec"
+        "de_cbble"
+        "de_chateau"
+        "de_dust"
+        "de_dust2"
+        "de_inferno"
+        "de_nuke"
+        "de_piranesi"
+        "de_port"
+        "de_prodigy"
+        "de_tides"
+        "de_train"
+    )
+    
+    echo -e "${YELLOW}Поиск дополнительных карт...${NC}"
+    
+    # Находим все .bsp файлы, исключая стандартные
+    local maps_to_remove=()
+    for map in "$MAPS_DIR"/*.bsp; do
+        if [ -f "$map" ]; then
+            map_name=$(basename "$map" .bsp)
+            # Пропускаем служебные карты
+            case "$map_name" in
+                test_hardware|test_speakers) continue ;;
+            esac
+            # Проверяем, является ли карта стандартной
+            local is_standard=0
+            for std_map in "${standard_maps[@]}"; do
+                if [ "$map_name" = "$std_map" ]; then
+                    is_standard=1
+                    break
+                fi
+            done
+            if [ $is_standard -eq 0 ]; then
+                maps_to_remove+=("$map_name")
+            fi
+        fi
+    done
+    
+    if [ ${#maps_to_remove[@]} -eq 0 ]; then
+        echo -e "${GREEN}Дополнительных карт не найдено.${NC}"
+        sleep 2
+        return 0
+    fi
+    
+    echo -e "${CYAN}Найдено дополнительных карт: ${#maps_to_remove[@]}${NC}"
+    echo -e "${YELLOW}Список карт, которые будут удалены:${NC}"
+    local count=0
+    for map in "${maps_to_remove[@]}"; do
+        count=$((count + 1))
+        echo -e "${WHITE}$count) $map${NC}"
+    done
+    
+    echo ""
+    echo -e "${RED}ВНИМАНИЕ: Это действие необратимо!${NC}"
+    read -p "$(echo -e "${WHITE}Удалить все дополнительные карты? (y/n): ${NC}")" confirm
+    
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        echo -e "${YELLOW}Отменено.${NC}"
+        sleep 1
+        return 0
+    fi
+    
+    # Удаление карт
+    echo -e "${YELLOW}Удаление карт...${NC}"
+    local removed_count=0
+    local failed_count=0
+    local bz2_removed=0
+    local bz2_failed=0
+    local fastdl_bsp_removed=0
+    local fastdl_bsp_failed=0
+    local fastdl_bz2_removed=0
+    local fastdl_bz2_failed=0
+    
+    for map_name in "${maps_to_remove[@]}"; do
+        local map_removed=0
+        
+        # --- Удаление .bsp файла из локальной папки maps ---
+        if rm -f "$MAPS_DIR/${map_name}.bsp" 2>/dev/null; then
+            echo -e "${GREEN}  ✓ Удален .bsp из maps: $map_name${NC}"
+            map_removed=1
+            removed_count=$((removed_count + 1))
+        else
+            echo -e "${RED}  ✗ Ошибка удаления .bsp из maps: $map_name${NC}"
+            failed_count=$((failed_count + 1))
+        fi
+        
+        # --- Удаление .bz2 файлов из локальной папки maps ---
+        if rm -f "$MAPS_DIR/${map_name}.bsp.bz2" 2>/dev/null; then
+            if [ -f "$MAPS_DIR/${map_name}.bsp.bz2" ]; then
+                bz2_failed=$((bz2_failed + 1))
+            else
+                echo -e "${CYAN}    ✓ Удален .bsp.bz2 из maps: $map_name${NC}"
+                bz2_removed=$((bz2_removed + 1))
+            fi
+        else
+            if [ -f "$MAPS_DIR/${map_name}.bsp.bz2" ]; then
+                echo -e "${YELLOW}    ⚠ Не удалось удалить .bsp.bz2 из maps: $map_name${NC}"
+                bz2_failed=$((bz2_failed + 1))
+            fi
+        fi
+        
+        # --- Удаление других связанных файлов из локальной папки maps ---
+        rm -f "$MAPS_DIR/${map_name}.nav" 2>/dev/null
+        rm -f "$MAPS_DIR/${map_name}.nav.bz2" 2>/dev/null
+        rm -f "$MAPS_DIR/${map_name}.res" 2>/dev/null
+        rm -f "$MAPS_DIR/${map_name}.res.bz2" 2>/dev/null
+        rm -f "$MAPS_DIR/${map_name}.cache" 2>/dev/null
+        rm -f "$MAPS_DIR/${map_name}.ain" 2>/dev/null
+        rm -f "$MAPS_DIR/${map_name}.log" 2>/dev/null
+        rm -f "$MAPS_DIR/${map_name}.lst" 2>/dev/null
+        
+        # --- Удаление .bsp файлов из FastDL ---
+        if [ -d "$FASTDL_MAPS_DIR" ]; then
+            # Удаляем .bsp
+            if rm -f "$FASTDL_MAPS_DIR/${map_name}.bsp" 2>/dev/null; then
+                if [ -f "$FASTDL_MAPS_DIR/${map_name}.bsp" ]; then
+                    fastdl_bsp_failed=$((fastdl_bsp_failed + 1))
+                else
+                    echo -e "${CYAN}    ✓ Удален .bsp из FastDL: $map_name${NC}"
+                    fastdl_bsp_removed=$((fastdl_bsp_removed + 1))
+                fi
+            else
+                if [ -f "$FASTDL_MAPS_DIR/${map_name}.bsp" ]; then
+                    echo -e "${YELLOW}    ⚠ Не удалось удалить .bsp из FastDL: $map_name${NC}"
+                    fastdl_bsp_failed=$((fastdl_bsp_failed + 1))
+                else
+                    echo -e "${CYAN}    · .bsp не найден в FastDL: $map_name${NC}"
+                fi
+            fi
+            
+            # Удаляем .bsp.bz2 из FastDL
+            if rm -f "$FASTDL_MAPS_DIR/${map_name}.bsp.bz2" 2>/dev/null; then
+                if [ -f "$FASTDL_MAPS_DIR/${map_name}.bsp.bz2" ]; then
+                    fastdl_bz2_failed=$((fastdl_bz2_failed + 1))
+                else
+                    echo -e "${CYAN}    ✓ Удален .bsp.bz2 из FastDL: $map_name${NC}"
+                    fastdl_bz2_removed=$((fastdl_bz2_removed + 1))
+                fi
+            else
+                if [ -f "$FASTDL_MAPS_DIR/${map_name}.bsp.bz2" ]; then
+                    echo -e "${YELLOW}    ⚠ Не удалось удалить .bsp.bz2 из FastDL: $map_name${NC}"
+                    fastdl_bz2_failed=$((fastdl_bz2_failed + 1))
+                else
+                    echo -e "${CYAN}    · .bsp.bz2 не найден в FastDL: $map_name${NC}"
+                fi
+            fi
+            
+            # Удаляем .nav.bz2 если есть
+            rm -f "$FASTDL_MAPS_DIR/${map_name}.nav.bz2" 2>/dev/null
+            
+            # Удаляем .res.bz2 если есть
+            rm -f "$FASTDL_MAPS_DIR/${map_name}.res.bz2" 2>/dev/null
+        else
+            echo -e "${YELLOW}    · FastDL не настроен или директория отсутствует${NC}"
+        fi
+    done
+    
+    # --- Удаление всех оставшихся .bz2 файлов в папке maps (мусор) ---
+    local orphan_bz2_local=$(find "$MAPS_DIR" -name "*.bsp.bz2" -type f 2>/dev/null | wc -l)
+    if [ "$orphan_bz2_local" -gt 0 ]; then
+        echo ""
+        echo -e "${YELLOW}Внимание: В папке maps осталось $orphan_bz2_local .bz2 файлов.${NC}"
+        read -p "$(echo -e "${WHITE}Очистить ВСЕ .bz2 файлы из папки maps? (y/n): ${NC}")" clean_bz2_local
+        
+        if [ "$clean_bz2_local" = "y" ] || [ "$clean_bz2_local" = "Y" ]; then
+            echo -e "${YELLOW}Очистка всех .bz2 файлов из папки maps...${NC}"
+            local cleaned=0
+            for bz2_file in "$MAPS_DIR"/*.bsp.bz2; do
+                if [ -f "$bz2_file" ]; then
+                    if rm -f "$bz2_file" 2>/dev/null; then
+                        cleaned=$((cleaned + 1))
+                    fi
+                fi
+            done
+            echo -e "${GREEN}✓ Удалено .bz2 файлов из maps: $cleaned${NC}"
+        fi
+    fi
+    
+    # --- Очистка FastDL от всех оставшихся файлов удаленных карт ---
+    if [ -d "$FASTDL_MAPS_DIR" ]; then
+        echo ""
+        echo -e "${YELLOW}Проверка FastDL на наличие оставшихся файлов...${NC}"
+        
+        # Находим все файлы в FastDL, которые соответствуют удаленным картам
+        local remaining_files=0
+        for map_name in "${maps_to_remove[@]}"; do
+            # Проверяем наличие любых файлов с именем карты
+            local found_files=$(find "$FASTDL_MAPS_DIR" -name "${map_name}.*" -type f 2>/dev/null | wc -l)
+            if [ "$found_files" -gt 0 ]; then
+                remaining_files=$((remaining_files + found_files))
+                echo -e "${YELLOW}  Найдены файлы для $map_name в FastDL: $found_files${NC}"
+                # Удаляем все файлы с именем карты
+                find "$FASTDL_MAPS_DIR" -name "${map_name}.*" -type f -delete 2>/dev/null
+                echo -e "${GREEN}    ✓ Удалены все файлы $map_name из FastDL${NC}"
+            fi
+        done
+        
+        if [ "$remaining_files" -gt 0 ]; then
+            echo -e "${GREEN}✓ Удалено файлов из FastDL: $remaining_files${NC}"
+        else
+            echo -e "${CYAN}· В FastDL не найдено оставшихся файлов удаленных карт${NC}"
+        fi
+        
+        # Удаляем пустые папки
+        echo -e "${YELLOW}Очистка FastDL от пустых папок...${NC}"
+        find "$FASTDL_MAPS_DIR" -type d -empty -delete 2>/dev/null
+        echo -e "${GREEN}✓ FastDL очищен${NC}"
+    fi
+    
+    # --- Удаление карт из mapcycle.txt ---
+    if [ -f "$MAPCYCLE_FILE" ]; then
+        echo -e "${YELLOW}Обновление mapcycle.txt...${NC}"
+        local temp_file="${MAPCYCLE_FILE}.tmp"
+        if cp "$MAPCYCLE_FILE" "$temp_file" 2>/dev/null; then
+            for map_name in "${maps_to_remove[@]}"; do
+                # Удаляем точное совпадение
+                sed -i "/^${map_name}$/d" "$temp_file" 2>/dev/null
+                # Удаляем если есть пробелы после
+                sed -i "/^${map_name} /d" "$temp_file" 2>/dev/null
+                # Удаляем если есть в начале строки с пробелами
+                sed -i "/^[[:space:]]*${map_name}$/d" "$temp_file" 2>/dev/null
+                sed -i "/^[[:space:]]*${map_name} /d" "$temp_file" 2>/dev/null
+            done
+            
+            if mv "$temp_file" "$MAPCYCLE_FILE" 2>/dev/null; then
+                chown "$username":"$username" "$MAPCYCLE_FILE" 2>/dev/null
+                echo -e "${GREEN}✓ mapcycle.txt обновлен${NC}"
+            else
+                echo -e "${RED}✗ Ошибка обновления mapcycle.txt${NC}"
+                rm -f "$temp_file" 2>/dev/null
+            fi
+        else
+            echo -e "${RED}✗ Ошибка создания временного файла для mapcycle.txt${NC}"
+        fi
+    fi
+    
+    echo ""
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}Результат удаления карт:${NC}"
+    echo -e "${GREEN}  Локальная папка maps:${NC}"
+    echo -e "${GREEN}    Удалено .bsp: $removed_count${NC}"
+    if [ $failed_count -gt 0 ]; then
+        echo -e "${RED}    Ошибок удаления .bsp: $failed_count${NC}"
+    fi
+    echo -e "${GREEN}    Удалено .bsp.bz2: $bz2_removed${NC}"
+    if [ $bz2_failed -gt 0 ]; then
+        echo -e "${RED}    Ошибок удаления .bsp.bz2: $bz2_failed${NC}"
+    fi
+    echo -e "${GREEN}  FastDL (/var/www/fastdl/css/cstrike/maps):${NC}"
+    if [ $fastdl_bsp_removed -gt 0 ]; then
+        echo -e "${GREEN}    Удалено .bsp: $fastdl_bsp_removed${NC}"
+    fi
+    if [ $fastdl_bsp_failed -gt 0 ]; then
+        echo -e "${RED}    Ошибок удаления .bsp: $fastdl_bsp_failed${NC}"
+    fi
+    if [ $fastdl_bz2_removed -gt 0 ]; then
+        echo -e "${GREEN}    Удалено .bsp.bz2: $fastdl_bz2_removed${NC}"
+    fi
+    if [ $fastdl_bz2_failed -gt 0 ]; then
+        echo -e "${RED}    Ошибок удаления .bsp.bz2: $fastdl_bz2_failed${NC}"
+    fi
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+    
+    # Предлагаем перезапустить сервер
+    echo ""
+    if [ -f "/home/$username/start_css.sh" ]; then
+        read -p "$(echo -e "${WHITE}Перезагрузить сервер CSS для применения изменений? (y/n): ${NC}")" restart_choice
+        if [ "$restart_choice" = "y" ] || [ "$restart_choice" = "Y" ]; then
+            restart_css_server "$username"
+        else
+            echo -e "${YELLOW}Перезапуск пропущен. Изменения применятся после рестарта сервера.${NC}"
+        fi
+    fi
+    
+    sleep 2
+    read -p "$(echo -e "${WHITE}Нажмите Enter для продолжения...${NC}")"
+}
+
+# Функция для удаления всех плагинов
+function remove_all_plugins {
+    local username=$1
+    local SOURCEMOD_DIR="/home/$username/csserver/cstrike/addons/sourcemod"
+    
+    clear_screen
+    step_echo "Удаление всех дополнительных плагинов"
+    
+    if [ ! -d "$SOURCEMOD_DIR" ]; then
+        echo -e "${RED}SourceMod не установлен!${NC}"
+        return 1
+    fi
+    
+    # Список стандартных плагинов SourceMod (которые НЕ удаляем)
+    local standard_plugins=(
+        "admin-flatfile.smx"
+        "adminhelp.smx"
+        "adminmenu.smx"
+        "antiflood.smx"
+        "basebans.smx"
+        "basechat.smx"
+        "basecomm.smx"
+        "basecommands.smx"
+        "basetriggers.smx"
+        "basevotes.smx"
+        "clientprefs.smx"
+        "funcommands.smx"
+        "funvotes.smx"
+        "nextmap.smx"
+        "playercommands.smx"
+        "reservedslots.smx"
+        "sounds.smx"
+    )
+    
+    # Находим все .smx файлы в папке plugins
+    echo -e "${YELLOW}Поиск установленных плагинов...${NC}"
+    
+    local plugins_to_remove=()
+    if [ -d "$SOURCEMOD_DIR/plugins" ]; then
+        for plugin in "$SOURCEMOD_DIR/plugins"/*.smx; do
+            if [ -f "$plugin" ]; then
+                plugin_name=$(basename "$plugin")
+                # Проверяем, является ли плагин стандартным
+                local is_standard=0
+                for std_plugin in "${standard_plugins[@]}"; do
+                    if [ "$plugin_name" = "$std_plugin" ]; then
+                        is_standard=1
+                        break
+                    fi
+                done
+                if [ $is_standard -eq 0 ]; then
+                    plugins_to_remove+=("$plugin_name")
+                fi
+            fi
+        done
+    fi
+    
+    # Проверяем наличие BotsManager и других дополнительных плагинов
+    local additional_packages=()
+    
+    # Проверка BotsManager
+    if [ -f "$SOURCEMOD_DIR/plugins/BotsManager.smx" ] || \
+       [ -f "$SOURCEMOD_DIR/plugins/botsmanager.smx" ] || \
+       [ -d "$SOURCEMOD_DIR/scripting/BotsManager" ] || \
+       [ -f "/home/$username/csserver/cstrike/cfg/sourcemod/BotsManager.cfg" ]; then
+        additional_packages+=("BotsManager (пакет)")
+    fi
+    
+    # Проверка WeaponGiver
+    if [ -f "$SOURCEMOD_DIR/plugins/sm_weapongiver_rus_1.01.smx" ] || \
+       [ -f "$SOURCEMOD_DIR/plugins/weapongiver.smx" ]; then
+        additional_packages+=("WeaponGiver")
+    fi
+    
+    # Проверка NoBlock
+    if [ -f "$SOURCEMOD_DIR/plugins/noblock.smx" ]; then
+        additional_packages+=("NoBlock")
+    fi
+    
+    # Проверка LanOfDoomRespawn
+    if [ -f "$SOURCEMOD_DIR/plugins/lan_of_doom_respawn.smx" ]; then
+        additional_packages+=("LanOfDoomRespawn")
+    fi
+    
+    # Проверка new_year_seconds
+    if [ -f "$SOURCEMOD_DIR/plugins/new_year_seconds.smx" ]; then
+        additional_packages+=("new_year_seconds")
+    fi
+    
+    # Объединяем списки
+    if [ ${#additional_packages[@]} -gt 0 ]; then
+        for pkg in "${additional_packages[@]}"; do
+            # Проверяем, не добавлен ли уже
+            local already_added=0
+            for existing in "${plugins_to_remove[@]}"; do
+                if [ "$existing" = "$pkg" ]; then
+                    already_added=1
+                    break
+                fi
+            done
+            if [ $already_added -eq 0 ]; then
+                plugins_to_remove+=("$pkg")
+            fi
+        done
+    fi
+    
+    if [ ${#plugins_to_remove[@]} -eq 0 ]; then
+        echo -e "${GREEN}Дополнительных плагинов не найдено.${NC}"
+        sleep 2
+        return 0
+    fi
+    
+    echo -e "${CYAN}Найдено дополнительных плагинов: ${#plugins_to_remove[@]}${NC}"
+    echo -e "${YELLOW}Список плагинов, которые будут удалены:${NC}"
+    local count=0
+    for plugin in "${plugins_to_remove[@]}"; do
+        count=$((count + 1))
+        echo -e "${WHITE}$count) $plugin${NC}"
+    done
+    
+    echo ""
+    echo -e "${RED}ВНИМАНИЕ: Это действие необратимо!${NC}"
+    read -p "$(echo -e "${WHITE}Удалить все дополнительные плагины? (y/n): ${NC}")" confirm
+    
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        echo -e "${YELLOW}Отменено.${NC}"
+        sleep 1
+        return 0
+    fi
+    
+    # Удаление плагинов
+    echo -e "${YELLOW}Удаление плагинов...${NC}"
+    local removed_count=0
+    local failed_count=0
+    
+    for plugin_name in "${plugins_to_remove[@]}"; do
+        case "$plugin_name" in
+            "BotsManager (пакет)")
+                # Удаляем BotsManager
+                rm -f "$SOURCEMOD_DIR/plugins/BotsManager.smx" 2>/dev/null
+                rm -f "$SOURCEMOD_DIR/plugins/botsmanager.smx" 2>/dev/null
+                rm -rf "$SOURCEMOD_DIR/scripting/BotsManager" 2>/dev/null
+                rm -f "/home/$username/csserver/cstrike/cfg/sourcemod/BotsManager.cfg" 2>/dev/null
+                echo -e "${GREEN}  ✓ Удален: BotsManager${NC}"
+                removed_count=$((removed_count + 1))
+                ;;
+            "WeaponGiver")
+                rm -f "$SOURCEMOD_DIR/plugins/sm_weapongiver_rus_1.01.smx" 2>/dev/null
+                rm -f "$SOURCEMOD_DIR/plugins/weapongiver.smx" 2>/dev/null
+                echo -e "${GREEN}  ✓ Удален: WeaponGiver${NC}"
+                removed_count=$((removed_count + 1))
+                ;;
+            "NoBlock")
+                rm -f "$SOURCEMOD_DIR/plugins/noblock.smx" 2>/dev/null
+                echo -e "${GREEN}  ✓ Удален: NoBlock${NC}"
+                removed_count=$((removed_count + 1))
+                ;;
+            "LanOfDoomRespawn")
+                rm -f "$SOURCEMOD_DIR/plugins/lan_of_doom_respawn.smx" 2>/dev/null
+                echo -e "${GREEN}  ✓ Удален: LanOfDoomRespawn${NC}"
+                removed_count=$((removed_count + 1))
+                ;;
+            "new_year_seconds")
+                rm -f "$SOURCEMOD_DIR/plugins/new_year_seconds.smx" 2>/dev/null
+                echo -e "${GREEN}  ✓ Удален: new_year_seconds${NC}"
+                removed_count=$((removed_count + 1))
+                ;;
+            *)
+                # Удаляем обычный .smx плагин
+                if rm -f "$SOURCEMOD_DIR/plugins/$plugin_name" 2>/dev/null; then
+                    echo -e "${GREEN}  ✓ Удален: $plugin_name${NC}"
+                    removed_count=$((removed_count + 1))
+                else
+                    echo -e "${RED}  ✗ Ошибка удаления: $plugin_name${NC}"
+                    failed_count=$((failed_count + 1))
+                fi
+                ;;
+        esac
+    done
+    
+    # Удаляем файлы переводов для дополнительных плагинов (если есть)
+    if [ -d "$SOURCEMOD_DIR/translations" ]; then
+        echo -e "${YELLOW}Удаление файлов переводов дополнительных плагинов...${NC}"
+        local trans_removed=0
+        for trans_file in "$SOURCEMOD_DIR/translations"/*.txt; do
+            if [ -f "$trans_file" ]; then
+                file_name=$(basename "$trans_file")
+                # Пропускаем системные файлы переводов
+                local is_system_trans=0
+                case "$file_name" in
+                    admin.*|common.*|core.*|keybindings.*|plugin.*|base*.*|fun*.*|player*.*|reserved*.*) 
+                        is_system_trans=1 
+                        ;;
+                esac
+                if [ $is_system_trans -eq 0 ]; then
+                    if rm -f "$trans_file" 2>/dev/null; then
+                        echo -e "${GREEN}  ✓ Удален перевод: $file_name${NC}"
+                        trans_removed=$((trans_removed + 1))
+                    fi
+                fi
+            fi
+        done
+        if [ $trans_removed -gt 0 ]; then
+            echo -e "${GREEN}  Удалено файлов переводов: $trans_removed${NC}"
+        fi
+    fi
+    
+    # Удаляем конфиги дополнительных плагинов (если есть)
+    if [ -d "/home/$username/csserver/cstrike/cfg/sourcemod" ]; then
+        echo -e "${YELLOW}Удаление конфигов дополнительных плагинов...${NC}"
+        local cfg_removed=0
+        for cfg_file in "/home/$username/csserver/cstrike/cfg/sourcemod"/*.cfg; do
+            if [ -f "$cfg_file" ]; then
+                file_name=$(basename "$cfg_file")
+                # Пропускаем системные конфиги
+                local is_system_cfg=0
+                case "$file_name" in
+                    sourcemod.cfg|admin*.cfg|base*.cfg|core.cfg|fun*.cfg|player*.cfg|reserved*.cfg|plugin*.cfg)
+                        is_system_cfg=1
+                        ;;
+                esac
+                if [ $is_system_cfg -eq 0 ] && [ "$file_name" != "BotsManager.cfg" ]; then
+                    if rm -f "$cfg_file" 2>/dev/null; then
+                        echo -e "${GREEN}  ✓ Удален конфиг: $file_name${NC}"
+                        cfg_removed=$((cfg_removed + 1))
+                    fi
+                fi
+            fi
+        done
+        if [ $cfg_removed -gt 0 ]; then
+            echo -e "${GREEN}  Удалено конфигов: $cfg_removed${NC}"
+        fi
+    fi
+    
+    echo ""
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}Результат удаления плагинов:${NC}"
+    echo -e "${GREEN}  Удалено плагинов: $removed_count${NC}"
+    if [ $failed_count -gt 0 ]; then
+        echo -e "${RED}  Ошибок удаления: $failed_count${NC}"
+    fi
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+    
+    # Предлагаем перезапустить сервер
+    echo ""
+    if [ -f "/home/$username/start_css.sh" ]; then
+        read -p "$(echo -e "${WHITE}Перезагрузить сервер CSS для применения изменений? (y/n): ${NC}")" restart_choice
+        if [ "$restart_choice" = "y" ] || [ "$restart_choice" = "Y" ]; then
+            restart_css_server "$username"
+        else
+            echo -e "${YELLOW}Перезапуск пропущен. Изменения применятся после рестарта сервера.${NC}"
+        fi
+    fi
+    
+    sleep 1
+    read -p "$(echo -e "${WHITE}Нажмите Enter для продолжения...${NC}")"
+}
+
+# Функция для удаления всех карт и плагинов
+function remove_all_maps_and_plugins {
+    local username=$1
+    
+    if [ -z "$username" ]; then
+        read -p "$(echo -e "${WHITE}Введите имя пользователя сервера CSS: ${NC}")" username
+    fi
+    
+    if ! id "$username" &>/dev/null; then
+        echo -e "${RED}Пользователь $username не найден!${NC}"
+        sleep 2
+        return 1
+    fi
+    
+    clear_screen
+    step_echo "Удаление всех дополнительных карт и плагинов"
+    
+    echo -e "${RED}╔═══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║                                                           ║${NC}"
+    echo -e "${RED}║  ВНИМАНИЕ: Это действие полностью удалит все:            ║${NC}"
+    echo -e "${RED}║  - Дополнительные карты (оставит только стандартные)     ║${NC}"
+    echo -e "${RED}║  - Все установленные плагины (кроме системных)           ║${NC}"
+    echo -e "${RED}║                                                           ║${NC}"
+    echo -e "${RED}║  Это действие НЕОБРАТИМО!                                ║${NC}"
+    echo -e "${RED}║                                                           ║${NC}"
+    echo -e "${RED}╚═══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${YELLOW}Пользователь: $username${NC}"
+    echo ""
+    
+    read -p "$(echo -e "${WHITE}Вы уверены, что хотите продолжить? (y/n): ${NC}")" confirm
+    
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        echo -e "${YELLOW}Отменено.${NC}"
+        sleep 1
+        return 0
+    fi
+    
+    echo ""
+    read -p "$(echo -e "${RED}Введите 'DELETE ALL' для подтверждения: ${NC}")" confirm_text
+    
+    if [ "$confirm_text" != "DELETE ALL" ]; then
+        echo -e "${YELLOW}Отменено.${NC}"
+        sleep 1
+        return 0
+    fi
+    
+    echo ""
+    echo -e "${YELLOW}Начинаем удаление...${NC}"
+    sleep 1
+    
+    # Удаляем карты
+    remove_all_maps "$username"
+    
+    # Удаляем плагины
+    remove_all_plugins "$username"
+    
+    echo ""
+    echo -e "${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║                                                           ║${NC}"
+    echo -e "${GREEN}║  ✓ Все дополнительные карты и плагины удалены!           ║${NC}"
+    echo -e "${GREEN}║                                                           ║${NC}"
+    echo -e "${GREEN}║  Оставлены только стандартные карты и системные плагины. ║${NC}"
+    echo -e "${GREEN}║                                                           ║${NC}"
+    echo -e "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}"
+    
+    sleep 2
+    read -p "$(echo -e "${WHITE}Нажмите Enter для продолжения...${NC}")"
+}
+
+# Главное меню (обновленная версия)
 function show_menu {
     while true; do
         clear
@@ -2211,12 +3289,15 @@ function show_menu {
         echo -e "${WHITE}3) Очистить мертвые screen сессии${NC}"
         echo -e "${WHITE}4) Настроить FastDL (быстрая загрузка)${NC}"
         echo -e "${WHITE}5) Обновить mapcycle.txt (список карт)${NC}"
-        echo -e "${WHITE}6) Показать информацию о FastDL${NC}"
-        echo -e "${WHITE}7) Выполнить обновление FastDL (команда из cron)${NC}"
-        echo -e "${WHITE}8) Выход${NC}"
+        echo -e "${WHITE}6) Установить дополнительные карты${NC}"
+        echo -e "${WHITE}7) Установить плагины${NC}"
+        echo -e "${WHITE}8) Показать информацию о FastDL${NC}"
+        echo -e "${WHITE}9) Выполнить обновление FastDL (команда из cron)${NC}"
+        echo -e "${WHITE}10) Удалить ВСЕ карты и плагины${NC}"
+        echo -e "${WHITE}11) Выход${NC}"
         echo -e "${PURPLE}========================================${NC}"
         
-        read -p "$(echo -e "${WHITE}Выберите действие [1-8]: ${NC}")" choice
+        read -p "$(echo -e "${WHITE}Выберите действие [1-11]: ${NC}")" choice
         
         case $choice in
             1) install_css ;;
@@ -2241,12 +3322,39 @@ function show_menu {
                 fi
                 ;;
             6)
-                show_fastdl_info
+                read -p "$(echo -e "${WHITE}Введите имя пользователя сервера CSS: ${NC}")" username
+                if id "$username" &>/dev/null; then
+                    install_additional_maps "$username"
+                else
+                    echo -e "${RED}Пользователь $username не найден!${NC}"
+                    sleep 2
+                fi
                 ;;
             7)
-                run_fastdl_cron
+                read -p "$(echo -e "${WHITE}Введите имя пользователя сервера CSS: ${NC}")" username
+                if id "$username" &>/dev/null; then
+                    install_plugins "$username"
+                else
+                    echo -e "${RED}Пользователь $username не найден!${NC}"
+                    sleep 2
+                fi
                 ;;
             8)
+                show_fastdl_info
+                ;;
+            9)
+                run_fastdl_cron
+                ;;
+            10)
+                read -p "$(echo -e "${WHITE}Введите имя пользователя сервера CSS: ${NC}")" username
+                if id "$username" &>/dev/null; then
+                    remove_all_maps_and_plugins "$username"
+                else
+                    echo -e "${RED}Пользователь $username не найден!${NC}"
+                    sleep 2
+                fi
+                ;;
+            11)
                 clear
                 echo -e "${GREEN}Выход...${NC}"
                 exit 0
@@ -2259,7 +3367,7 @@ function show_menu {
     done
 }
 
-# Обработка аргументов командной строки
+# Обработка аргументов командной строки (обновленная)
 if [ "$1" = "--uninstall" ] || [ "$1" = "-u" ]; then
     uninstall_css
 elif [ "$1" = "--install" ] || [ "$1" = "-i" ]; then
@@ -2280,12 +3388,33 @@ elif [ "$1" = "--mapcycle" ] || [ "$1" = "-m" ]; then
     else
         echo -e "${RED}Пользователь $username не найден!${NC}"
     fi
+elif [ "$1" = "--maps" ] || [ "$1" = "-maps" ]; then
+    read -p "Введите имя пользователя сервера CSS: " username
+    if id "$username" &>/dev/null; then
+        install_additional_maps "$username"
+    else
+        echo -e "${RED}Пользователь $username не найден!${NC}"
+    fi
 elif [ "$1" = "--fastdl-info" ] || [ "$1" = "-fi" ]; then
     show_fastdl_info
 elif [ "$1" = "--run-fastdl" ] || [ "$1" = "-rf" ]; then
     run_fastdl_cron
+elif [ "$1" = "--remove-maps-plugins" ] || [ "$1" = "-rmp" ]; then
+    read -p "Введите имя пользователя сервера CSS: " username
+    if id "$username" &>/dev/null; then
+        remove_all_maps_and_plugins "$username"
+    else
+        echo -e "${RED}Пользователь $username не найден!${NC}"
+    fi
 elif [ "$1" = "--menu" ] || [ "$1" = "-M" ]; then
     show_menu
+elif [ "$1" = "--plugins" ] || [ "$1" = "-p" ]; then
+    read -p "Введите имя пользователя сервера CSS: " username
+    if id "$username" &>/dev/null; then
+        install_plugins "$username"
+    else
+        echo -e "${RED}Пользователь $username не найден!${NC}"
+    fi
 else
     show_menu
 fi

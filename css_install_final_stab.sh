@@ -3277,8 +3277,275 @@ function remove_all_maps_and_plugins {
     read -p "$(echo -e "${WHITE}Нажмите Enter для продолжения...${NC}")"
 }
 
-# Главное меню (обновленная версия)
+# Функция для перезагрузки сервера CSS (вызывается из меню)
+function restart_css_server_menu {
+    clear_screen
+    step_echo "Перезагрузка сервера CSS"
+    
+    read -p "$(echo -e "${WHITE}Введите имя пользователя сервера CSS: ${NC}")" username
+    
+    if ! id "$username" &>/dev/null; then
+        echo -e "${RED}Пользователь $username не найден!${NC}"
+        sleep 2
+        read -p "$(echo -e "${WHITE}Нажмите Enter для возврата в меню...${NC}")"
+        return 1
+    fi
+    
+    # Проверяем, есть ли скрипт запуска
+    if [ ! -f "/home/$username/start_css.sh" ]; then
+        echo -e "${RED}Скрипт запуска /home/$username/start_css.sh не найден!${NC}"
+        echo -e "${YELLOW}Сервер не установлен или установлен некорректно.${NC}"
+        sleep 2
+        read -p "$(echo -e "${WHITE}Нажмите Enter для возврата в меню...${NC}")"
+        return 1
+    fi
+    
+    # Показываем статус сервера
+    echo ""
+    echo -e "${CYAN}Текущий статус сервера:${NC}"
+    if pgrep -u "$username" -f "srcds_run.*cstrike" >/dev/null 2>&1 || \
+       pgrep -u "$username" -f "srcds_linux.*cstrike" >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ Сервер запущен${NC}"
+        
+        # Показываем PID
+        local pids=$(pgrep -u "$username" -f "srcds_run.*cstrike" 2>/dev/null || pgrep -u "$username" -f "srcds_linux.*cstrike" 2>/dev/null)
+        echo -e "${WHITE}  PID: $pids${NC}"
+    else
+        echo -e "${RED}✗ Сервер не запущен${NC}"
+    fi
+    
+    # Показываем screen сессии
+    echo -e "${CYAN}Screen сессии:${NC}"
+    sudo -u "$username" screen -list 2>/dev/null || echo -e "${YELLOW}  (нет активных сессий)${NC}"
+    
+    echo ""
+    echo -e "${YELLOW}Вы уверены, что хотите перезагрузить сервер?${NC}"
+    echo -e "${YELLOW}Все игроки будут отключены на время перезагрузки.${NC}"
+    read -p "$(echo -e "${WHITE}Перезагрузить сервер? (y/n): ${NC}")" confirm
+    
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        echo -e "${YELLOW}Перезагрузка отменена.${NC}"
+        sleep 1
+        read -p "$(echo -e "${WHITE}Нажмите Enter для возврата в меню...${NC}")"
+        return 0
+    fi
+    
+    echo ""
+    echo -e "${YELLOW}Перезагрузка сервера...${NC}"
+    
+    # Используем существующую функцию restart_css_server
+    if restart_css_server "$username"; then
+        echo -e "${GREEN}✓ Сервер CSS успешно перезагружен!${NC}"
+    else
+        echo -e "${RED}✗ Ошибка при перезагрузке сервера!${NC}"
+        echo -e "${YELLOW}Попробуйте перезагрузить вручную:${NC}"
+        echo -e "${GREEN}  sudo -u $username bash /home/$username/start_css.sh${NC}"
+    fi
+    
+    sleep 2
+    read -p "$(echo -e "${WHITE}Нажмите Enter для возврата в меню...${NC}")"
+}
+
+# Функция для остановки сервера CSS (с интерактивным режимом)
+function stop_css_server {
+    local username=$1
+    local interactive=${2:-1}  # 1 - интерактивный режим, 0 - без подтверждения
+
+    # Если имя пользователя не передано, запрашиваем
+    if [ -z "$username" ]; then
+        if [ $interactive -eq 1 ]; then
+            read -p "$(echo -e "${WHITE}Введите имя пользователя сервера CSS: ${NC}")" username
+        else
+            echo -e "${RED}Не указано имя пользователя!${NC}"
+            return 1
+        fi
+    fi
+
+    if ! id "$username" &>/dev/null; then
+        echo -e "${RED}Пользователь $username не найден!${NC}"
+        return 1
+    fi
+
+    # Проверяем наличие сервера
+    if [ ! -f "/home/$username/start_css.sh" ]; then
+        echo -e "${RED}Скрипт запуска /home/$username/start_css.sh не найден!${NC}"
+        return 1
+    fi
+
+    # Показываем статус сервера (только в интерактивном режиме)
+    if [ $interactive -eq 1 ]; then
+        clear_screen
+        step_echo "Остановка сервера CSS"
+        
+        echo -e "${CYAN}Текущий статус сервера:${NC}"
+        if pgrep -u "$username" -f "srcds_run.*cstrike" >/dev/null 2>&1 || \
+           pgrep -u "$username" -f "srcds_linux.*cstrike" >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ Сервер запущен${NC}"
+            
+            local pids=$(pgrep -u "$username" -f "srcds_run.*cstrike" 2>/dev/null || pgrep -u "$username" -f "srcds_linux.*cstrike" 2>/dev/null)
+            echo -e "${WHITE}  PID: $pids${NC}"
+            
+            echo -e "${CYAN}Screen сессия:${NC}"
+            sudo -u "$username" screen -list 2>/dev/null | grep -q "csserver" && echo -e "${GREEN}  ✓ csserver активна${NC}" || echo -e "${YELLOW}  ✗ csserver не найдена${NC}"
+        else
+            echo -e "${RED}✗ Сервер не запущен${NC}"
+            echo ""
+            read -p "$(echo -e "${WHITE}Нажмите Enter для возврата...${NC}")"
+            return 0
+        fi
+        
+        echo ""
+        echo -e "${YELLOW}Вы уверены, что хотите остановить сервер?${NC}"
+        echo -e "${RED}Все игроки будут отключены!${NC}"
+        read -p "$(echo -e "${WHITE}Остановить сервер? (y/n): ${NC}")" confirm
+        
+        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+            echo -e "${YELLOW}Остановка отменена.${NC}"
+            sleep 1
+            return 0
+        fi
+        
+        echo ""
+        echo -e "${YELLOW}Остановка сервера...${NC}"
+    fi
+
+    # Останавливаем screen-сессию
+    sudo -u "$username" screen -X -S csserver quit 2>/dev/null
+    
+    # Убиваем процессы сервера
+    local killed=0
+    local pids=$(pgrep -u "$username" -f "srcds_run.*cstrike" 2>/dev/null)
+    if [ -n "$pids" ]; then
+        for pid in $pids; do
+            kill -15 $pid 2>/dev/null && killed=$((killed + 1))
+            sleep 0.5
+        done
+        sleep 2
+        # Если остались, убиваем принудительно
+        pids=$(pgrep -u "$username" -f "srcds_run.*cstrike" 2>/dev/null)
+        if [ -n "$pids" ]; then
+            for pid in $pids; do
+                kill -9 $pid 2>/dev/null
+            done
+        fi
+    fi
+    
+    # Очищаем screen
+    sudo -u "$username" screen -wipe 2>/dev/null
+    
+    # Проверяем, остановился ли сервер
+    sleep 2
+    if pgrep -u "$username" -f "srcds_run.*cstrike" >/dev/null 2>&1 || \
+       pgrep -u "$username" -f "srcds_linux.*cstrike" >/dev/null 2>&1; then
+        if [ $interactive -eq 1 ]; then
+            echo -e "${RED}✗ Не удалось остановить сервер!${NC}"
+            echo -e "${YELLOW}Попробуйте остановить вручную:${NC}"
+            echo -e "${GREEN}  sudo -u $username screen -X -S csserver quit${NC}"
+            echo -e "${GREEN}  pkill -u $username -f srcds_run.*cstrike${NC}"
+        fi
+        return 1
+    else
+        if [ $interactive -eq 1 ]; then
+            echo -e "${GREEN}✓ Сервер CSS успешно остановлен!${NC}"
+            echo -e "${YELLOW}Для запуска сервера используйте:${NC}"
+            echo -e "${GREEN}  sudo -u $username bash /home/$username/start_css.sh${NC}"
+            echo -e "${YELLOW}или пункт меню 'Перезагрузить сервер CSS'${NC}"
+        fi
+        return 0
+    fi
+}
+
+# Функция для проверки статуса сервера (улучшенная)
+function get_server_status {
+    local username=$1
+    local status=""
+    local found_user=""
+    
+    # Если имя пользователя не указано, пытаемся найти
+    if [ -z "$username" ]; then
+        # Сначала проверяем всех пользователей в /home
+        for user in $(ls /home 2>/dev/null); do
+            if id "$user" &>/dev/null && [ -f "/home/$user/start_css.sh" ]; then
+                # Проверяем процессы
+                if pgrep -u "$user" -f "srcds_run.*cstrike" >/dev/null 2>&1 || \
+                   pgrep -u "$user" -f "srcds_linux.*cstrike" >/dev/null 2>&1; then
+                    status="✅ Сервер ЗАПУЩЕН (пользователь: $user)"
+                    found_user="$user"
+                    break
+                fi
+            fi
+        done
+        
+        # Если не нашли запущенный, проверяем наличие установленного сервера
+        if [ -z "$status" ]; then
+            for user in $(ls /home 2>/dev/null); do
+                if id "$user" &>/dev/null && [ -f "/home/$user/start_css.sh" ]; then
+                    # Проверяем, есть ли screen сессия
+                    if sudo -u "$user" screen -list 2>/dev/null | grep -q "csserver"; then
+                        status="✅ Сервер ЗАПУЩЕН (screen, пользователь: $user)"
+                        found_user="$user"
+                        break
+                    fi
+                fi
+            done
+        fi
+        
+        # Если нашли запущенный сервер, добавляем имя пользователя
+        if [ -n "$found_user" ]; then
+            status="✅ Сервер ЗАПУЩЕН (пользователь: $found_user)"
+        else
+            # Проверяем глобально (на случай если сервер запущен от другого пользователя)
+            if pgrep -f "srcds_run.*cstrike" >/dev/null 2>&1 || \
+               pgrep -f "srcds_linux.*cstrike" >/dev/null 2>&1; then
+                status="✅ Сервер ЗАПУЩЕН"
+            else
+                # Проверяем наличие установленного сервера (но не запущенного)
+                local has_server=0
+                for user in $(ls /home 2>/dev/null); do
+                    if id "$user" &>/dev/null && [ -f "/home/$user/start_css.sh" ]; then
+                        has_server=1
+                        found_user="$user"
+                        break
+                    fi
+                done
+                if [ $has_server -eq 1 ]; then
+                    status="❌ Сервер НЕ ЗАПУЩЕН (установлен для $found_user)"
+                else
+                    status="❌ Сервер НЕ УСТАНОВЛЕН"
+                fi
+            fi
+        fi
+    else
+        # Проверяем конкретного пользователя
+        if ! id "$username" &>/dev/null; then
+            echo "❌ Пользователь $username не найден"
+            return 1
+        fi
+        
+        if [ -f "/home/$username/start_css.sh" ]; then
+            if pgrep -u "$username" -f "srcds_run.*cstrike" >/dev/null 2>&1 || \
+               pgrep -u "$username" -f "srcds_linux.*cstrike" >/dev/null 2>&1; then
+                status="✅ Сервер ЗАПУЩЕН (пользователь: $username)"
+            else
+                # Проверяем screen сессию
+                if sudo -u "$username" screen -list 2>/dev/null | grep -q "csserver"; then
+                    status="✅ Сервер ЗАПУЩЕН (screen, пользователь: $username)"
+                else
+                    status="❌ Сервер НЕ ЗАПУЩЕН (пользователь: $username)"
+                fi
+            fi
+        else
+            status="❌ Сервер НЕ УСТАНОВЛЕН (пользователь: $username)"
+        fi
+    fi
+    
+    echo "$status"
+}
+
+# Главное меню (обновленная версия с отображением статуса)
 function show_menu {
+    local cached_username=""
+    
     while true; do
         clear
         echo -e "${PURPLE}========================================${NC}"
@@ -3294,19 +3561,59 @@ function show_menu {
         echo -e "${WHITE}8) Показать информацию о FastDL${NC}"
         echo -e "${WHITE}9) Выполнить обновление FastDL (команда из cron)${NC}"
         echo -e "${WHITE}10) Удалить ВСЕ карты и плагины${NC}"
-        echo -e "${WHITE}11) Выход${NC}"
+        echo -e "${WHITE}11) Перезагрузить сервер CSS${NC}"
+        echo -e "${WHITE}12) Остановить сервер CSS${NC}"
+        echo -e "${WHITE}13) Выход${NC}"
         echo -e "${PURPLE}========================================${NC}"
         
-        read -p "$(echo -e "${WHITE}Выберите действие [1-11]: ${NC}")" choice
+        # Определяем статус сервера
+        local server_status=""
+        if [ -n "$cached_username" ] && id "$cached_username" &>/dev/null; then
+            server_status=$(get_server_status "$cached_username")
+        else
+            server_status=$(get_server_status)
+            # Кешируем имя пользователя если найден
+            if [[ "$server_status" == *"пользователь:"* ]]; then
+                cached_username=$(echo "$server_status" | sed -E 's/.*пользователь: ([^)]*).*/\1/')
+            fi
+        fi
+        
+        # Отображаем статус внизу с цветным выделением
+        echo ""
+        echo -ne "${PURPLE}▶ Статус: ${NC}"
+        
+        # Проверяем статус - если есть "НЕ ЗАПУЩЕН" или "НЕ УСТАНОВЛЕН" - красным
+        if [[ "$server_status" == *"НЕ ЗАПУЩЕН"* ]] || [[ "$server_status" == *"НЕ УСТАНОВЛЕН"* ]]; then
+            echo -e "${RED}$server_status${NC}"
+        elif [[ "$server_status" == *"ЗАПУЩЕН"* ]] || [[ "$server_status" == *"запущен"* ]]; then
+            echo -e "${GREEN}$server_status${NC}"
+        else
+            # Если статус неопределенный - тоже красным (лучше перестраховаться)
+            echo -e "${RED}$server_status${NC}"
+        fi
+        
+        echo -e "${PURPLE}========================================${NC}"
+        
+        read -p "$(echo -e "${WHITE}Выберите действие [1-13]: ${NC}")" choice
         
         case $choice in
-            1) install_css ;;
-            2) uninstall_css ;;
-            3) clean_screen_sessions ;;
+            1) 
+                install_css
+                # После установки кешируем имя пользователя
+                cached_username=""
+                ;;
+            2) 
+                uninstall_css
+                cached_username=""
+                ;;
+            3) 
+                clean_screen_sessions
+                ;;
             4) 
                 read -p "$(echo -e "${WHITE}Введите имя пользователя сервера CSS: ${NC}")" username
                 if id "$username" &>/dev/null; then
                     configure_fastdl "$username"
+                    cached_username="$username"
                 else
                     echo -e "${RED}Пользователь $username не найден!${NC}"
                     sleep 2
@@ -3316,6 +3623,7 @@ function show_menu {
                 read -p "$(echo -e "${WHITE}Введите имя пользователя сервера CSS: ${NC}")" username
                 if id "$username" &>/dev/null; then
                     update_mapcycle "$username"
+                    cached_username="$username"
                 else
                     echo -e "${RED}Пользователь $username не найден!${NC}"
                     sleep 2
@@ -3325,6 +3633,7 @@ function show_menu {
                 read -p "$(echo -e "${WHITE}Введите имя пользователя сервера CSS: ${NC}")" username
                 if id "$username" &>/dev/null; then
                     install_additional_maps "$username"
+                    cached_username="$username"
                 else
                     echo -e "${RED}Пользователь $username не найден!${NC}"
                     sleep 2
@@ -3334,6 +3643,7 @@ function show_menu {
                 read -p "$(echo -e "${WHITE}Введите имя пользователя сервера CSS: ${NC}")" username
                 if id "$username" &>/dev/null; then
                     install_plugins "$username"
+                    cached_username="$username"
                 else
                     echo -e "${RED}Пользователь $username не найден!${NC}"
                     sleep 2
@@ -3349,12 +3659,22 @@ function show_menu {
                 read -p "$(echo -e "${WHITE}Введите имя пользователя сервера CSS: ${NC}")" username
                 if id "$username" &>/dev/null; then
                     remove_all_maps_and_plugins "$username"
+                    cached_username="$username"
                 else
                     echo -e "${RED}Пользователь $username не найден!${NC}"
                     sleep 2
                 fi
                 ;;
             11)
+                restart_css_server_menu
+                cached_username=""
+                ;;
+            12)
+                stop_css_server
+                read -p "$(echo -e "${WHITE}Нажмите Enter для возврата в меню...${NC}")"
+                cached_username=""
+                ;;
+            13)
                 clear
                 echo -e "${GREEN}Выход...${NC}"
                 exit 0
@@ -3403,6 +3723,20 @@ elif [ "$1" = "--remove-maps-plugins" ] || [ "$1" = "-rmp" ]; then
     read -p "Введите имя пользователя сервера CSS: " username
     if id "$username" &>/dev/null; then
         remove_all_maps_and_plugins "$username"
+    else
+        echo -e "${RED}Пользователь $username не найден!${NC}"
+    fi
+elif [ "$1" = "--restart" ] || [ "$1" = "-r" ]; then
+    read -p "Введите имя пользователя сервера CSS: " username
+    if id "$username" &>/dev/null; then
+        restart_css_server "$username"
+    else
+        echo -e "${RED}Пользователь $username не найден!${NC}"
+    fi
+elif [ "$1" = "--stop" ] || [ "$1" = "-s" ]; then
+    read -p "Введите имя пользователя сервера CSS: " username
+    if id "$username" &>/dev/null; then
+        stop_css_server "$username" 0  # 0 - неинтерактивный режим (без подтверждения)
     else
         echo -e "${RED}Пользователь $username не найден!${NC}"
     fi
